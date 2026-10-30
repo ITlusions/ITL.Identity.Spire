@@ -1,0 +1,30 @@
+# No svid.enabled toggle here, unlike svid-toggle-demo - this chart only ever runs one way
+# (JWT-SVID, verified for real). Relies on ITL.Identity.Spire's own cluster-wide "default"
+# ClusterSPIFFEID (fallback: true, every namespace except itl-spire/spire-server/spire-system)
+# for registration - no dedicated ClusterSPIFFEID of this chart's own, unlike
+# svid-toggle-demo's, since this chart has no DNS-name/multi-workload-identity need that
+# default doesn't already cover.
+svid:
+  trustDomain: itlusions.local
+  className: itl-spire-spire
+  uid: 1000
+  gid: 1000
+
+api:
+  # Audience the frontend's JWT-SVID is scoped to, and the AUD the api checks on the way in -
+  # a real check this time, not decoded-but-ignored.
+  jwtAudience: spire-jwt-verify-demo-api
+
+  # The ISS SPIRE stamps into every JWT-SVID it mints (global.spire.jwtIssuer in
+  # ITL.Identity.Spire's own values.yaml) - checked for real here too. If that value ever
+  # changes, this one has to change with it.
+  jwtIssuer: "https://trust.itlusions.com"
+
+  # In-cluster only, no Ingress - the ClusterIP Service ITL.Identity.Spire's
+  # spiffe-oidc-discovery-provider already exposes (confirmed live:
+  # spire-spiffe-oidc-discovery-provider.itl-spire.svc.cluster.local, port 80, plain HTTP -
+  # TLS is edge-only on that chart's own public Ingress, which this demo deliberately does not
+  # go through). The api is already inside the cluster, so it never needed the public
+  # trust.itlusions.com hostname at all - see ITL.Identity.Spire
+  # docs/1-operations/1.3-oidc-discovery.md for that Service's own history.
+  jwksUrl: "http://spire-spiffe-oidc-discovery-provider.itl-spire.svc.cluster.local/keys"

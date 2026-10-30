@@ -1,0 +1,15 @@
+apiVersion: v2
+name: spire-jwt-verify-demo
+description: >-
+  Second, narrower example: frontend -> api, where the api performs REAL
+  JWT-SVID signature verification (RS256, against SPIRE's own JWKS) instead
+  of decoding claims unverified - the shortcut examples/svid-toggle-demo
+  takes deliberately, and the one the abandoned Keycloak-exchange path in
+  that same chart ran into a real platform limitation trying to replace.
+  No Keycloak, no ITL.AuthGateway, no Ingress, no oauth2-proxy, no browser
+  login at all - pure in-cluster SPIFFE workload identity, verified in code,
+  nothing else. See this folder's README for why this exists as a SEPARATE
+  example rather than another toggle on the first one.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

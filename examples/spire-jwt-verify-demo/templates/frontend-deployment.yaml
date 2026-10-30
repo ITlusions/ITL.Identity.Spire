@@ -1,0 +1,118 @@
+# No Ingress, no Keycloak, no browser-facing anything - this chart is tested by kubectl exec'ing
+# into this pod directly, same pattern as examples/svid-toggle-demo's own "Verify" section's
+# first command. The whole point here is the api's own verification code (api-deployment.yaml),
+# not a UI.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}-frontend
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}-frontend
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      securityContext:
+        fsGroup: {{ .Values.svid.gid }}
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        - name: jwt-helper-config
+          configMap:
+            name: {{ .Release.Name }}-jwt-helper-config
+        - name: jwt-svid
+          emptyDir: {}
+      initContainers:
+        - name: jwt-svid-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.11.0
+          restartPolicy: Always
+          securityContext:
+            runAsUser: {{ .Values.svid.uid }}
+            runAsGroup: {{ .Values.svid.gid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          args: ["-config", "/etc/spiffe-helper.conf", "-daemon-mode=true"]
+          volumeMounts:
+            - {name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true}
+            - {name: jwt-helper-config, mountPath: /etc/spiffe-helper.conf, subPath: spiffe-helper.conf, readOnly: true}
+            - {name: jwt-svid, mountPath: /jwt-svid}
+      containers:
+        - name: frontend
+          image: python:3.12-alpine
+          securityContext:
+            runAsUser: {{ .Values.svid.uid }}
+            runAsGroup: {{ .Values.svid.gid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          ports:
+            - containerPort: 8080
+          env:
+            - {name: API_URL, value: "http://{{ .Release.Name }}-api:8081"}
+            # Same /tmp-for-$HOME reasoning as examples/svid-toggle-demo's api-deployment.yaml -
+            # not actually needed here since this container installs nothing, kept only for
+            # symmetry with the api container below in case that ever changes.
+            - {name: HOME, value: /tmp}
+          volumeMounts:
+            - {name: jwt-svid, mountPath: /jwt-svid, readOnly: true}
+          command: ["python3", "-c"]
+          args:
+            - |
+              import http.server, urllib.request, urllib.error, os
+
+              API_URL = os.environ["API_URL"]
+
+              def call_api(path):
+                  token = open("/jwt-svid/jwt_svid.token").read().strip()
+                  req = urllib.request.Request(API_URL + path)
+                  req.add_header("Authorization", "Bearer " + token)
+                  try:
+                      with urllib.request.urlopen(req, timeout=5) as resp:
+                          return resp.status, resp.read().decode()
+                  except urllib.error.HTTPError as e:
+                      return e.code, e.read().decode()
+
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path != "/":
+                          self.send_response(404)
+                          self.end_headers()
+                          return
+                      try:
+                          status, body = call_api("/whoami")
+                          result = "api responded %d: %s" % (status, body)
+                      except Exception as e:
+                          result = "api call failed: %s" % e
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/plain")
+                      self.end_headers()
+                      self.wfile.write(result.encode())
+
+              http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-frontend
+spec:
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}-frontend
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 8080
+      targetPort: 8080

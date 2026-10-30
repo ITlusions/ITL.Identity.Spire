@@ -1,0 +1,128 @@
+# The one thing this whole example exists to demonstrate: REAL JWT-SVID signature
+# verification, in the api's own code, against SPIRE's own JWKS - no Keycloak, no exchange, no
+# "decode the claims and trust them" shortcut. Compare to
+# examples/svid-toggle-demo/templates/api-deployment.yaml's own `decode_jwt_claims`, which is
+# explicit that it skips exactly this step.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}-api
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}-api
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      securityContext:
+        fsGroup: {{ .Values.svid.gid }}
+      containers:
+        - name: api
+          image: python:3.12-alpine
+          securityContext:
+            runAsUser: {{ .Values.svid.uid }}
+            runAsGroup: {{ .Values.svid.gid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          ports:
+            - containerPort: 8081
+          env:
+            - {name: JWT_AUDIENCE, value: {{ .Values.api.jwtAudience | quote }}}
+            - {name: JWT_ISSUER, value: {{ .Values.api.jwtIssuer | quote }}}
+            - {name: JWKS_URL, value: {{ .Values.api.jwksUrl | quote }}}
+            # Same /.local-under-this-uid pip-install gotcha as svid-toggle-demo's own
+            # api-deployment.yaml ("Permission denied: '/.local'" confirmed live there) -
+            # /tmp is writable regardless of uid.
+            - {name: HOME, value: /tmp}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --quiet --no-cache-dir 'pyjwt[crypto]'
+              python3 -c "
+              import http.server, json, time, os, urllib.request
+              import jwt
+              from jwt.algorithms import RSAAlgorithm
+
+              AUDIENCE = os.environ['JWT_AUDIENCE']
+              ISSUER = os.environ['JWT_ISSUER']
+              JWKS_URL = os.environ['JWKS_URL']
+
+              # Cached, not fetched on every single request - SPIRE rotates its signing keys
+              # (confirmed live in ITL.Identity.Spire's own operations doc: a 'JWT key activated'
+              # event with an expiration a few hours out), so this still has to re-fetch
+              # periodically, just not on the hot path every time.
+              _jwks_cache = {'keys': {}, 'fetched_at': 0.0}
+
+              def get_signing_key(kid):
+                  now = time.time()
+                  if kid not in _jwks_cache['keys'] or now - _jwks_cache['fetched_at'] > 300:
+                      with urllib.request.urlopen(JWKS_URL, timeout=5) as resp:
+                          jwks = json.load(resp)
+                      _jwks_cache['keys'] = {
+                          k['kid']: RSAAlgorithm.from_jwk(json.dumps(k)) for k in jwks['keys']
+                      }
+                      _jwks_cache['fetched_at'] = now
+                  return _jwks_cache['keys'].get(kid)
+
+              def authenticate(headers):
+                  auth = headers.get('Authorization', '')
+                  if not auth.startswith('Bearer '):
+                      return None, 'missing Bearer token'
+                  token = auth[7:]
+                  try:
+                      header = jwt.get_unverified_header(token)
+                  except jwt.PyJWTError as e:
+                      return None, 'malformed JWT: %s' % e
+                  key = get_signing_key(header.get('kid'))
+                  if key is None:
+                      return None, 'unknown signing key (kid=%s) - not in current JWKS' % header.get('kid')
+                  try:
+                      # This one call does everything the other demo's own decode_jwt_claims
+                      # explicitly skips: signature verification against the real public key,
+                      # plus audience/issuer/expiry checks - all real, all library-enforced,
+                      # not hand-rolled.
+                      claims = jwt.decode(token, key=key, algorithms=['RS256'], audience=AUDIENCE, issuer=ISSUER)
+                  except jwt.PyJWTError as e:
+                      return None, 'verification failed: %s' % e
+                  return claims, None
+
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      claims, err = authenticate(self.headers)
+                      if err:
+                          self.send_response(401)
+                          self.end_headers()
+                          self.wfile.write(('JWT-SVID verification failed: %s' % err).encode())
+                          return
+                      if self.path == '/whoami':
+                          body = json.dumps({'called_by': claims['sub'], 'verified': True}).encode()
+                      else:
+                          self.send_response(404)
+                          self.end_headers()
+                          return
+                      self.send_response(200)
+                      self.send_header('Content-Type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(body)
+
+              http.server.HTTPServer(('0.0.0.0', 8081), Handler).serve_forever()
+              "
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-api
+spec:
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}-api
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 8081
+      targetPort: 8081

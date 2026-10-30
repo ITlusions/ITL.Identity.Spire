@@ -118,7 +118,11 @@ one-liner for working with `entry show`'s plain-text output at this cluster's ac
 ## See also
 
 - [`examples/svid-toggle-demo`](examples/svid-toggle-demo/) - a three-tier app demonstrating
-  X.509-SVID (via `ITL.Kyverno`'s annotation), JWT-SVID (hand-rolled), and where a classic
-  CN-matching database connection needs `ITL.CertManager.CA` instead - SPIFFE SVIDs were never
-  going to satisfy CNPG's `clientCASecret` as-is.
+  X.509-SVID (via `ITL.Kyverno`'s annotation), JWT-SVID (hand-rolled), where a classic
+  CN-matching database connection needs `ITL.CertManager.CA` instead (SPIFFE SVIDs were never
+  going to satisfy CNPG's `clientCASecret` as-is), and an optional - currently disabled, real
+  Keycloak-side limitation found - JWT-SVID-for-Keycloak-token exchange (RFC 7523).
+- [`examples/spire-jwt-verify-demo`](examples/spire-jwt-verify-demo/) - a narrower, two-workload
+  example where the api performs REAL JWT-SVID signature verification against SPIRE's own JWKS,
+  in its own code - no Keycloak, no Ingress, in-cluster only.
 - [`docs/index.md`](docs/index.md) - the full docs index.
