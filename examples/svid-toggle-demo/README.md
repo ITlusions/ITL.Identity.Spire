@@ -1,18 +1,22 @@
 # svid-toggle-demo
 
-A three-tier app (frontend → api → database) demonstrating **four separate identity mechanisms**,
-each used only where it actually fits, with no overlap between them:
+A three-tier app (frontend → api → database) demonstrating **five separate identity
+mechanisms**, each used only where it actually fits, with no overlap between them:
 
 | Hop | Mechanism | Purpose |
 |---|---|---|
 | Browser → frontend | Keycloak (OIDC, via [`ITL.AuthGateway`](https://github.com/ITlusions/ITL.AuthGateway)) | *Which human* is using this app |
-| frontend → api | JWT-SVID (SPIFFE, hand-rolled `spiffe-helper`) | *Which workload* is calling this endpoint |
+| frontend → api | JWT-SVID (SPIFFE, hand-rolled `spiffe-helper`) | *Which workload* is calling this endpoint - the default path |
+| frontend → api (optional) | JWT-SVID **exchanged for a Keycloak access token** (RFC 7523) | Same question, answered through Keycloak instead of locally - see §5, **currently disabled**, real Keycloak-side blocker found |
 | api → database | X.509 via [`ITL.CertManager.CA`](https://github.com/ITlusions/ITL.CertManager.CA) | CNPG's `clientcert=verify-full`, which only understands classic CN-matching certs |
 | api (standalone) | X.509-SVID (SPIFFE, via [`ITL.Kyverno`](https://github.com/ITlusions/ITL.Kyverno)'s annotation) | Demonstrates the reusable injection pattern - not consumed by anything in this chart |
 
-`svid.enabled` is still the one toggle that turns the SPIFFE/cert-manager layers on or off
-together - the Keycloak layer (webapp-ingress.yaml, auth-gateway.yaml) is independent of it and
-always active once deployed.
+`svid.enabled` is the one toggle that turns the SPIFFE/cert-manager layers on or off together -
+the Keycloak layer (webapp-ingress.yaml, auth-gateway.yaml) is independent of it and always
+active once deployed. `keycloakExchange.enabled` is a second, independent toggle, layered on top
+of `svid.enabled`, that switches the frontend→api hop specifically from "send the raw JWT-SVID"
+to "exchange it at Keycloak first" - see §5 for what that actually does and why it's off by
+default.
 
 ## The chain, end to end
 
@@ -20,12 +24,15 @@ always active once deployed.
 flowchart LR
     B["Browser"] -->|"OIDC login"| KC["Keycloak<br/>realm: itlusions"]
     B -->|"session cookie"| FE["frontend (webapp)<br/>nginx + Python"]
-    FE -->|"Bearer: JWT-SVID<br/>aud=svid-toggle-demo-api"| API["api<br/>Python"]
+    FE -->|"default: Bearer JWT-SVID<br/>aud=svid-toggle-demo-api"| API["api<br/>Python"]
+    FE -.->|"keycloakExchange.enabled:<br/>RFC 7523 jwt-bearer grant<br/>(currently fails, see §5)"| KC
+    KC -.->|"would return a Keycloak<br/>access token to send instead"| API
     API -->|"PGSSLCERT/KEY<br/>cert-manager X.509"| DB[("CNPG Postgres<br/>demo-db")]
 
     FE -.->|"own JWT-SVID, fetched via<br/>hand-rolled spiffe-helper"| SPIRE["ITL.Identity.Spire<br/>SPIRE"]
     API -.->|"own X.509-SVID via<br/>ITL.Kyverno annotation<br/>not used for DB auth"| SPIRE
     API -->|"client cert, issued by"| CERTCA["ITL.CertManager.CA<br/>itl-database-client-ca-issuer"]
+    KC -.->|"validates JWT-SVID sig<br/>against SPIRE's JWKS"| SPIRE
 ```
 
 ## 1. Keycloak login on the frontend
@@ -131,17 +138,66 @@ exists purely to show the annotation-based injection pattern working on a real w
 independent of whatever that workload's own identity story for its *other* hops happens to be
 (here, cert-manager for Postgres, JWT-SVID for inbound auth).
 
+## 5. Optional: exchanging the JWT-SVID for a Keycloak token (`keycloakExchange.enabled`)
+
+**Status: implemented, deployed, currently disabled.** This is the demo's hop into
+`ITL.Identity.Spire`'s own [1.4 Keycloak token exchange](../../docs/1-operations/1.4-keycloak-token-exchange.md)
+doc - the frontend trading its JWT-SVID for a real Keycloak access token (RFC 7523 JWT
+Authorization Grant) before calling the api, instead of sending the raw JWT-SVID through
+directly. Flip `keycloakExchange.enabled: true` and redeploy to turn it on; `false` (the
+default) keeps §2's direct path.
+
+### What changes when it's enabled
+
+- `templates/jwt-helper-configmap.yaml`: the frontend's JWT-SVID audience switches from
+  `svid-toggle-demo-api` to Keycloak's own hostname - RFC 7523 requires the assertion's `aud`
+  to identify its actual recipient, which is now Keycloak, not the api.
+- `templates/webapp-deployment.yaml`: the frontend POSTs that JWT-SVID to Keycloak's token
+  endpoint (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`) and sends the resulting
+  Keycloak access token to the api instead of the raw JWT-SVID.
+- `templates/api-deployment.yaml`: the api checks a Keycloak token's `iss`/`azp` claims instead
+  of decoding a raw JWT-SVID's `aud` - same "claims only, no signature verification" shortcut
+  as the JWT-SVID path already had, kept consistent rather than introduced as a new one.
+- `templates/keycloak-exchange-secret-job.yaml`: a new post-install/upgrade Job fetches the
+  exchange client's secret from Keycloak's Admin REST API and writes it into this release's
+  own namespace. Unlike the browser-facing client (`authGateway.keycloak`, auto-secreted by the
+  Keycloak Operator's own `KeycloakOIDCClient` CR), the exchange client was created directly via
+  the Admin REST API in `ITL.Identity.Spire`'s own Phase 2 - no Operator-managed Secret exists
+  for it, so this Job reads Keycloak's admin service-account credentials cross-namespace
+  instead (a narrow RBAC grant, explicitly approved before being added).
+
+### Why it's off by default
+
+Live testing (on this cluster's Keycloak 26.8) found that Keycloak's built-in JWT Authorization
+Grant requires the client to authenticate via a `federated-jwt` authenticator pinned to one
+specific issuer/subject pair - a "one external identity : one Keycloak client" shape, not the
+"one shared client, many rotating SPIFFE subjects" shape this demo's frontend actually needs.
+Switching the exchange client to `federated-jwt` (even with `jwt.credential.issuer`/
+`jwt.credential.sub` set to match this demo's one SPIFFE ID exactly) broke client lookup
+entirely (`client_not_found`, confirmed via Keycloak's own event log) - reverted back to
+`client-secret` rather than leave a shared, production Keycloak client broken. With
+`client-secret` restored, the exchange call itself still fails
+(`invalid_grant: "JWT Authorization Grant is not supported for the requested client"`) - that
+is the actual, current state: the code path is real and toggle-complete, but Keycloak's own
+side of this mechanism needs further work before a live exchange succeeds. `docs/1-operations/
+1.4-keycloak-token-exchange.md` has the full investigation, including the one genuine root-cause
+bug found and fixed along the way (SPIRE's own `iss` claim not matching its advertised discovery
+issuer - see that doc's "issuer mismatch" section).
+
 ## Deploy
 
 ```bash
 cd itl.identity.spire/examples/svid-toggle-demo
 helm dependency update   # resolves the ITL.AuthGateway local-path dependency - see Chart.yaml's own comment on why file://
 helm install demo . -n svid-demo --create-namespace --set svid.enabled=true
+# add --set keycloakExchange.enabled=true for §5's path - see that section for its current status
 ```
 
 Requires, live on the cluster beforehand: `ITL.Kyverno`'s `spiffe-helper-inject` policy enabled,
 `ITL.CertManager.CA` deployed, and `ITL.Identity.Spire` deployed with a trust domain matching
-`values.yaml`'s `svid.trustDomain`/`svid.className`.
+`values.yaml`'s `svid.trustDomain`/`svid.className`. `keycloakExchange.enabled` additionally
+needs the `spire-trust` identity provider and `svid-toggle-demo-workload-exchange` client
+already configured in Keycloak - see `docs/1-operations/1.4-keycloak-token-exchange.md`.
 
 ## Verify
 
