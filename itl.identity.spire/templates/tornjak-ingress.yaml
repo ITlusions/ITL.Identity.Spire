@@ -1,0 +1,54 @@
+{{- if .Values.tornjakIngress.enabled }}
+# One hostname, one Ingress, two paths - "/" to the frontend Service, "/api" to the backend
+# Service. The backend gets no hostname/DNS/cert of its own on purpose (see values.yaml's
+# own comment): it's reachable only through this one path, behind the same basicAuth gate
+# as everything else here, never independently addressable from the public internet.
+#
+# Service names are upstream's own naming from the vendored "spire" chart dependency
+# (<release>-tornjak-frontend, <release>-tornjak-backend) - confirmed live against
+# `kubectl get svc -n itl-spire`, not guessed; see this chart's own values.yaml comment
+# on tornjak-frontend for the one time guessing that wrong broke things.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ .Release.Name }}-tornjak-basic-auth
+spec:
+  basicAuth:
+    secret: {{ .Values.tornjakIngress.basicAuth.secretName }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-tornjak
+  annotations:
+    cert-manager.io/cluster-issuer: {{ .Values.tornjakIngress.clusterIssuer }}
+    traefik.ingress.kubernetes.io/router.entrypoints: web, websecure
+    traefik.ingress.kubernetes.io/router.middlewares: >-
+      {{ .Release.Namespace }}-{{ .Release.Name }}-tornjak-basic-auth@kubernetescrd
+spec:
+  ingressClassName: {{ .Values.tornjakIngress.className }}
+  tls:
+    - hosts: [{{ .Values.tornjakIngress.host | quote }}]
+      secretName: {{ .Release.Name }}-tornjak-tls
+  rules:
+    - host: {{ .Values.tornjakIngress.host | quote }}
+      http:
+        paths:
+          # Longest-prefix-first: Traefik's own Ingress provider sorts by path length, but
+          # listing /api before / here too, so the intent reads correctly without relying on
+          # that sort happening to match.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-tornjak-backend
+                port:
+                  number: 10000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-tornjak-frontend
+                port:
+                  number: 3000
+{{- end }}

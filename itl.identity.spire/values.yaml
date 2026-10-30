@@ -108,8 +108,69 @@ spire:
             dnsNameTemplates:
               - '{{ .PodMeta.Namespace }}-{{ if index .PodMeta.Labels "app.kubernetes.io/name" }}{{ index .PodMeta.Labels "app.kubernetes.io/name" }}{{ else }}workload{{ end }}'
 
+    # Tornjak - the SPIFFE project's own web UI for SPIRE (registration entries, agents,
+    # trust bundle), since spire-server itself is CLI-only (see docs/1-operations/1.1-spire-cli.md).
+    # Already a conditional dependency of the upstream "spire" chart this wrapper tracks
+    # (charts/spire/Chart.yaml: `condition: tornjak-frontend.enabled`) - no new Chart.yaml
+    # dependency needed, just the two enable flags upstream ships disabled by default.
+    #
+    # No Ingress here on purpose: upstream's own `auth.enabled` default is `false` on both
+    # the backend and frontend - this is a full-CRUD admin UI over every registration entry
+    # in the cluster with no login at all. Reach it via `kubectl port-forward` until an
+    # auth provider is actually wired up (`tornjak.config.userManagement`/`auth.serverURL`),
+    # not by adding an Ingress and treating "nobody knows the URL" as access control.
+    tornjak:
+      enabled: true
+      # SQLite (upstream's own default) - matches this chart's own "Why SQLite" reasoning
+      # in the README (single-server control plane, no separate Postgres for a UI's own
+      # bookkeeping data).
+
   spire-agent:
     enabled: true
+
+  # tornjak-frontend is itself a dependency of the upstream "spire" chart (same level as
+  # spire-server/spire-agent above), not of this wrapper directly - confirmed live the hard
+  # way: setting this as a top-level key in this file renders nothing at all, Helm only
+  # passes it through when nested under `spire:` same as every other override here.
+  tornjak-frontend:
+    enabled: true
+    # Must be reachable from the BROWSER running this (client-side JS), not from inside the
+    # frontend pod - confirmed live that leaving this blank ("auto-detection") does not work
+    # across two separate `kubectl port-forward` tunnels on different local ports (3000 for
+    # the frontend, 10000 for the backend): every /api/v1/* call returns 200, but it's the
+    # frontend's own SPA catch-all route serving index.html back (client-side routing
+    # fallback for any unmatched path) - not the real backend, which saw zero requests in its
+    # own log the whole time. The frontend then tries to parse that HTML as JSON and fails
+    # silently, producing a blank page with no visible error. Matches the port-forward
+    # command actually used to reach the backend (see README "Verify"/Tornjak section) -
+    # update this if that port ever changes.
+    apiServerURL: "https://spire-ui.itlusions.com"
+
+# Exposes Tornjak's frontend UI via real Ingress/TLS instead of kubectl port-forward.
+# Rendered by templates/tornjak-ingress.yaml and templates/tornjak-basic-auth-secret.yaml -
+# this wrapper's own resources, not part of the upstream spire dependency (which has no
+# Ingress of its own for either component beyond a bare enable flag).
+#
+# The backend gets NO hostname/DNS/cert of its own - deliberately kept off the public
+# internet as its own addressable thing. The browser still needs to reach it somehow
+# (apiServerURL above is same-origin, not localhost), so this one Ingress routes BOTH
+# paths: "/" to the frontend Service, "/api" to the backend Service - one hostname, one
+# cert, one basicAuth gate, but the backend is reachable only through that one path under
+# that one gated hostname, never on its own.
+#
+# Gated with Traefik basicAuth specifically because Tornjak itself ships with
+# `auth.enabled: false` on both the backend and frontend - without this, the Ingress alone
+# would be a full-CRUD admin UI over every SPIFFE identity in the cluster, reachable by
+# anyone who finds the hostname. A single shared admin/password pair, not Keycloak OIDC -
+# simpler to stand up, and this is a single-operator admin tool, not a multi-user app.
+tornjakIngress:
+  enabled: true
+  className: itl-traefik
+  clusterIssuer: letsencrypt-issuer
+  host: spire-ui.itlusions.com
+  basicAuth:
+    secretName: tornjak-basic-auth
+    username: admin
 
 # Declarative registration entries, rendered as ClusterSPIFFEID CRDs by
 # templates/clusterspiffeid.yaml - the GitOps-friendly alternative to the
