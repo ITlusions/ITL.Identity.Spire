@@ -73,6 +73,16 @@ spec:
           env:
             - {name: API_URL, value: "http://{{ .Release.Name }}-api:8081"}
             - {name: SVID_ENABLED, value: {{ .Values.svid.enabled | quote }}}
+            - {name: KEYCLOAK_EXCHANGE_ENABLED, value: {{ .Values.keycloakExchange.enabled | quote }}}
+            {{- if .Values.keycloakExchange.enabled }}
+            - {name: KEYCLOAK_TOKEN_URL, value: "{{ .Values.keycloakExchange.issuerBase }}/realms/{{ .Values.keycloakExchange.realm }}/protocol/openid-connect/token"}
+            - {name: KEYCLOAK_EXCHANGE_CLIENT_ID, value: {{ .Values.keycloakExchange.clientId | quote }}}
+            - name: KEYCLOAK_EXCHANGE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloakExchange.secretRef.name }}
+                  key: client_secret
+            {{- end }}
           {{- if .Values.svid.enabled }}
           volumeMounts:
             - {name: jwt-svid, mountPath: /jwt-svid, readOnly: true}
@@ -80,18 +90,39 @@ spec:
           command: ["python3", "-c"]
           args:
             - |
-              import http.server, urllib.request, json, os
+              import http.server, urllib.request, urllib.parse, json, os
 
               API_URL = os.environ["API_URL"]
               SVID_ENABLED = os.environ["SVID_ENABLED"] == "true"
+              KEYCLOAK_EXCHANGE_ENABLED = os.environ["KEYCLOAK_EXCHANGE_ENABLED"] == "true"
+
+              def exchange_jwt_svid_for_keycloak_token(jwt_svid):
+                  # RFC 7523 JWT Authorization Grant - trades this frontend's own JWT-SVID for
+                  # a real Keycloak access token, instead of sending the raw JWT-SVID to the api
+                  # directly (ITL.Identity.Spire docs/1-operations/1.4-keycloak-token-exchange.md).
+                  # Requires the exchange client's OWN secret too (client auth on top of - not
+                  # instead of - the JWT-SVID's own short-lived, audience-scoped signature being
+                  # the actual per-request trust anchor) - see that same doc for why this is a
+                  # confidential client, not a judgment call made here.
+                  body = urllib.parse.urlencode({
+                      "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                      "assertion": jwt_svid,
+                      "client_id": os.environ["KEYCLOAK_EXCHANGE_CLIENT_ID"],
+                      "client_secret": os.environ["KEYCLOAK_EXCHANGE_CLIENT_SECRET"],
+                  }).encode()
+                  req = urllib.request.Request(os.environ["KEYCLOAK_TOKEN_URL"], data=body, method="POST")
+                  with urllib.request.urlopen(req, timeout=5) as resp:
+                      return json.loads(resp.read())["access_token"]
 
               def call_api(path):
-                  # The frontend's whole reason for having a JWT-SVID: present it as a bearer
-                  # token so the api (api-deployment.yaml) can authenticate THIS caller,
-                  # independent of whatever authenticates the api's own hop to Postgres.
+                  # The frontend's whole reason for having a JWT-SVID: present it (or, in
+                  # Keycloak-exchange mode, what it traded the JWT-SVID for) as a bearer token
+                  # so the api (api-deployment.yaml) can authenticate THIS caller, independent
+                  # of whatever authenticates the api's own hop to Postgres.
                   req = urllib.request.Request(API_URL + path)
                   if SVID_ENABLED:
-                      token = open("/jwt-svid/jwt_svid.token").read().strip()
+                      jwt_svid = open("/jwt-svid/jwt_svid.token").read().strip()
+                      token = exchange_jwt_svid_for_keycloak_token(jwt_svid) if KEYCLOAK_EXCHANGE_ENABLED else jwt_svid
                       req.add_header("Authorization", "Bearer " + token)
                   with urllib.request.urlopen(req, timeout=5) as resp:
                       return resp.status, resp.read().decode()

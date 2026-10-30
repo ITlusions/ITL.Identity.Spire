@@ -9,7 +9,15 @@ data:
     cert_dir = "/jwt-svid"
     jwt_svids = [
       {
+        {{- if .Values.keycloakExchange.enabled }}
+        # The audience must identify the token's actual recipient (RFC 7523) - that's now
+        # Keycloak (the frontend exchanges this JWT-SVID there, see webapp-deployment.yaml),
+        # not the api anymore. See values.yaml's own comment on api.jwtAudience for why these
+        # two modes need two different audience values.
+        jwt_audience = "{{ .Values.keycloakExchange.issuerBase }}"
+        {{- else }}
         jwt_audience = "{{ .Values.api.jwtAudience }}"
+        {{- end }}
         jwt_svid_file_name = "jwt_svid.token"
       }
     ]

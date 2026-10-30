@@ -99,6 +99,17 @@ spec:
             - {name: PGSSLKEY, value: /client-cert/tls.key}
             - {name: PGSSLROOTCERT, value: /certs-server-ca/ca.crt}
             - {name: JWT_AUDIENCE, value: {{ .Values.api.jwtAudience | quote }}}
+            - {name: KEYCLOAK_EXCHANGE_ENABLED, value: {{ .Values.keycloakExchange.enabled | quote }}}
+            {{- if .Values.keycloakExchange.enabled }}
+            # The api now checks a Keycloak-issued access token instead of the raw JWT-SVID -
+            # the frontend exchanges that JWT-SVID for one of these before calling here (see
+            # webapp-deployment.yaml). Same simplification as the JWT-SVID path already had:
+            # claims only (issuer, authorized party, expiry), no signature verification against
+            # Keycloak's JWKS - kept consistent with this demo's existing stated non-goal, not a
+            # new shortcut introduced here.
+            - {name: KEYCLOAK_ISSUER, value: "{{ .Values.keycloakExchange.issuerBase }}/realms/{{ .Values.keycloakExchange.realm }}"}
+            - {name: KEYCLOAK_EXCHANGE_CLIENT_ID, value: {{ .Values.keycloakExchange.clientId | quote }}}
+            {{- end }}
             # pip install (below) defaults to a per-user site path under $HOME ("/.local") when
             # it can't write the global site-packages - confirmed live, with no $HOME set for
             # this uid it falls back to "/" itself, which isn't writable either:
@@ -112,17 +123,37 @@ spec:
               import http.server, json, base64, time, os, psycopg2
 
               AUDIENCE = os.environ['JWT_AUDIENCE']
+              KEYCLOAK_EXCHANGE_ENABLED = os.environ['KEYCLOAK_EXCHANGE_ENABLED'] == 'true'
+              KEYCLOAK_ISSUER = os.environ.get('KEYCLOAK_ISSUER', '')
+              KEYCLOAK_EXCHANGE_CLIENT_ID = os.environ.get('KEYCLOAK_EXCHANGE_CLIENT_ID', '')
 
               def decode_jwt_claims(token):
                   # Decode only, same as the frontend's own /whoami did before this endpoint
-                  # existed - this demo does not verify the JWT-SVID's signature against
-                  # SPIRE's trust bundle, only its claims (audience, expiry). A real relying
-                  # party fetches the trust domain's JWKS via the Workload API and actually
-                  # verifies the signature - skipped here to keep this demo's own code short,
-                  # not because it would be hard to add.
+                  # existed - this demo does not verify the token's signature (against SPIRE's
+                  # trust bundle for a raw JWT-SVID, or against Keycloak's JWKS for an exchanged
+                  # access token), only its claims. A real relying party fetches the signer's
+                  # JWKS and actually verifies the signature - skipped here to keep this demo's
+                  # own code short, not because it would be hard to add, and kept as the same
+                  # simplification in both modes below rather than a new shortcut for the
+                  # Keycloak path specifically.
                   payload = token.split('.')[1]
                   payload += '=' * (-len(payload) % 4)
                   return json.loads(base64.urlsafe_b64decode(payload))
+
+              def authenticate_jwt_svid(claims):
+                  if AUDIENCE not in claims.get('aud', []):
+                      return 'wrong audience: %s' % claims.get('aud')
+                  return None
+
+              def authenticate_keycloak_token(claims):
+                  # 'azp' (authorized party) identifies WHICH client the exchange minted this
+                  # token for - the equivalent check to the JWT-SVID path's own audience check,
+                  # just under Keycloak's own claim name for it.
+                  if claims.get('iss') != KEYCLOAK_ISSUER:
+                      return 'wrong issuer: %s' % claims.get('iss')
+                  if claims.get('azp') != KEYCLOAK_EXCHANGE_CLIENT_ID:
+                      return 'wrong authorized party: %s' % claims.get('azp')
+                  return None
 
               def authenticate(headers):
                   auth = headers.get('Authorization', '')
@@ -132,11 +163,22 @@ spec:
                       claims = decode_jwt_claims(auth[7:])
                   except Exception:
                       return None, 'malformed JWT'
-                  if AUDIENCE not in claims.get('aud', []):
-                      return None, 'wrong audience: %s' % claims.get('aud')
+                  err = authenticate_keycloak_token(claims) if KEYCLOAK_EXCHANGE_ENABLED else authenticate_jwt_svid(claims)
+                  if err:
+                      return None, err
                   if claims.get('exp', 0) < time.time():
                       return None, 'expired'
                   return claims, None
+
+              def caller_id(claims):
+                  # In Keycloak-exchange mode, 'sub' is the synthetic linked user's internal
+                  # Keycloak UUID, not the SPIFFE ID - 'preferred_username' is, since that's
+                  # exactly what the spiffe-id-username IdP mapper set it to
+                  # (docs/1-operations/1.4-keycloak-token-exchange.md). Falls back to 'sub' for
+                  # the raw JWT-SVID path, where 'sub' already IS the SPIFFE ID.
+                  if KEYCLOAK_EXCHANGE_ENABLED:
+                      return claims.get('preferred_username', claims.get('sub'))
+                  return claims['sub']
 
               class Handler(http.server.BaseHTTPRequestHandler):
                   def do_GET(self):
@@ -144,10 +186,10 @@ spec:
                       if err:
                           self.send_response(401)
                           self.end_headers()
-                          self.wfile.write(('JWT-SVID auth failed: %s' % err).encode())
+                          self.wfile.write(('auth failed: %s' % err).encode())
                           return
                       if self.path == '/whoami':
-                          body = json.dumps({'called_by': claims['sub']}).encode()
+                          body = json.dumps({'called_by': caller_id(claims)}).encode()
                       elif self.path == '/data':
                           conn = psycopg2.connect()   # libpq env vars above - the X.509-SVID-equivalent cert-manager cert
                           cur = conn.cursor()
@@ -155,7 +197,7 @@ spec:
                           row = cur.fetchone()
                           conn.close()
                           body = json.dumps({
-                              'called_by': claims['sub'],
+                              'called_by': caller_id(claims),
                               'db_user': row[0],
                               'db_time': str(row[1]),
                           }).encode()

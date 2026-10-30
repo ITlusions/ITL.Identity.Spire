@@ -81,6 +81,30 @@ authGateway:
 # A second, simple workload (api-deployment.yaml) demonstrating JWT-SVID specifically - a
 # different SPIFFE identity format from the X.509-SVID the webapp/db-check path above uses.
 api:
-  # Audience the issued JWT-SVID is scoped to - arbitrary for this demo, but a real relying
-  # party would check this exact value when validating a token presented to it.
+  # Audience the issued JWT-SVID is scoped to. When keycloakExchange.enabled is true, this MUST
+  # be Keycloak's own hostname (RFC 7523's assertion `aud` must identify the token's intended
+  # recipient, which is now Keycloak, not the api anymore - the api receives a Keycloak access
+  # token instead, see keycloakExchange below) - when false, this is the api's own audience,
+  # checked directly as before.
   jwtAudience: svid-toggle-demo-api
+
+# ITL.Identity.Spire docs/1-operations/1.4-keycloak-token-exchange.md's Phase 3/4: the
+# frontend trades its JWT-SVID for a real Keycloak access token (RFC 7523 JWT Authorization
+# Grant) before calling the api, instead of sending the raw JWT-SVID straight through. Only
+# changes the frontend->api hop - api->database (client-certificate.yaml) is untouched, same
+# reasoning as the rest of this chart's own README on why that hop can't be reached by this at
+# all (Postgres has no concept of a bearer token).
+keycloakExchange:
+  enabled: false
+  issuerBase: https://sts.itlusions.com
+  realm: itlusions
+  # The confidential client created in ITL.Identity.Spire's Phase 2 directly via the Admin REST
+  # API (not a KeycloakOIDCClient CR, hence no Operator-managed secret to read directly - see
+  # templates/keycloak-exchange-secret-job.yaml for why that Job exists at all).
+  clientId: svid-toggle-demo-workload-exchange
+  clientUuid: 081425f2-36e6-4d82-8a32-173e8d83ccac
+  secretRef:
+    name: svid-toggle-demo-keycloak-exchange   # built by templates/keycloak-exchange-secret-job.yaml
+  adminSecretRef:
+    name: itl-keycloak-admin
+    namespace: itl-keycloak
