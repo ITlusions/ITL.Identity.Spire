@@ -1,8 +1,10 @@
 # The one toggle this example exists to demonstrate. Flip it and redeploy -
 # nothing else needs to change for the webapp to switch between password-only
-# and SVID-backed mTLS to its own database.
+# and SVID-backed mTLS to its own database. Defaults to true - this demo is
+# meant to be seen running with SVIDs on; set to false to see the
+# password-only path instead.
 svid:
-  enabled: false
+  enabled: true
 
   # SVID injection is entirely ITL.Kyverno's spiffe-helper-inject
   # ClusterPolicy's job, triggered by one pod annotation - this chart

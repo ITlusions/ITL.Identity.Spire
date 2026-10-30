@@ -12,11 +12,12 @@ mechanisms**, each used only where it actually fits, with no overlap between the
 | api (standalone) | X.509-SVID (SPIFFE, via [`ITL.Kyverno`](https://github.com/ITlusions/ITL.Kyverno)'s annotation) | Demonstrates the reusable injection pattern - not consumed by anything in this chart |
 
 `svid.enabled` is the one toggle that turns the SPIFFE/cert-manager layers on or off together -
-the Keycloak layer (webapp-ingress.yaml, auth-gateway.yaml) is independent of it and always
-active once deployed. `keycloakExchange.enabled` is a second, independent toggle, layered on top
-of `svid.enabled`, that switches the frontend→api hop specifically from "send the raw JWT-SVID"
-to "exchange it at Keycloak first" - see §5 for what that actually does and why it's off by
-default.
+**defaults to `true`**, since this demo is meant to be seen running with SVIDs on; set to
+`false` to see the password-only path instead. The Keycloak layer (webapp-ingress.yaml,
+auth-gateway.yaml) is independent of it and always active once deployed. `keycloakExchange.enabled`
+is a second, independent toggle, layered on top of `svid.enabled`, that switches the
+frontend→api hop specifically from "send the raw JWT-SVID" to "exchange it at Keycloak first" -
+see §5 for what that actually does and why it's off by default.
 
 ## The chain, end to end
 
@@ -189,7 +190,8 @@ issuer - see that doc's "issuer mismatch" section).
 ```bash
 cd itl.identity.spire/examples/svid-toggle-demo
 helm dependency update   # resolves the ITL.AuthGateway local-path dependency - see Chart.yaml's own comment on why file://
-helm install demo . -n svid-demo --create-namespace --set svid.enabled=true
+helm install demo . -n svid-demo --create-namespace
+# svid.enabled defaults to true - add --set svid.enabled=false to see the password-only path instead
 # add --set keycloakExchange.enabled=true for §5's path - see that section for its current status
 ```
 
