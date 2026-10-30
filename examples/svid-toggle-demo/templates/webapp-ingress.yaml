@@ -1,0 +1,89 @@
+# Two separate Ingress objects sharing one host, not one Ingress with two path rules - Traefik's
+# annotation-based middleware attachment applies to the WHOLE Ingress object, not per-path. If
+# the oauth2-proxy callback path shared an Ingress with the forwardAuth-protected root path, the
+# middleware would also gate /oauth2/callback itself - checking for a valid session on the exact
+# request that's trying to establish one in the first place. This split is the standard,
+# documented pattern for exactly this reason, not a guess.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-oauth2-callback
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-issuer
+    traefik.ingress.kubernetes.io/router.entrypoints: web, websecure
+spec:
+  ingressClassName: itl-traefik
+  tls:
+    - hosts: [{{ .Values.webapp.host | quote }}]
+      secretName: {{ .Release.Name }}-webapp-tls
+  rules:
+    - host: {{ .Values.webapp.host | quote }}
+      http:
+        paths:
+          - path: /oauth2
+            pathType: Prefix
+            backend:
+              service:
+                # itl-authgateway.fullname is based on .Chart.Name, not .Release.Name -
+                # confirmed live the hard way: "demo-authgw" (my first guess, following the
+                # convention used everywhere else in this chart) does not exist; the real
+                # Service is named from the Chart's own name instead.
+                name: {{ .Chart.Name }}-authgw
+                port:
+                  number: 4180
+---
+# redirect-to-login is NOT part of ITL.AuthGateway's own library chart - that chart only
+# provides the forwardAuth Middleware (a bare 401 on no session, confirmed live), not the
+# browser-facing redirect. Traefik's forwardAuth middleware forwards the auth server's response
+# code as-is; it does not turn a 401 into a redirect by itself. This `errors` Middleware is what
+# actually does that: on 401-403, instead of returning the forwardAuth response verbatim,
+# Traefik re-routes to oauth2-proxy's own /oauth2/start endpoint (not /oauth2/auth, the
+# forwardAuth check endpoint - a different path, which performs the actual 302 to Keycloak), with
+# the original URL preserved via {url} so the user lands back where they started after logging
+# in. Kept in this app's own templates, not contributed to the library chart, since every future
+# consumer of ITL.AuthGateway may want a different error-handling strategy (a custom error page,
+# a different redirect target) - this is a policy decision, not something the library should
+# assume on anyone's behalf.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ .Release.Name }}-oidc-redirect
+spec:
+  errors:
+    status: ["401-403"]
+    service:
+      name: {{ .Chart.Name }}-authgw   # itl-authgateway.fullname is .Chart.Name-based, not .Release.Name - see the other backend's own comment on this
+      port: 4180   # a plain integer, unlike Ingress's backend.service.port.number - confirmed live the Kubernetes CRD schema rejects the nested {number: ...} shape here
+    query: "/oauth2/start?rd={url}"
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-webapp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-issuer
+    traefik.ingress.kubernetes.io/router.entrypoints: web, websecure
+    # errors FIRST, then forwardAuth - confirmed live the reverse order (what seemed logical at
+    # first - "check the session, THEN catch the 401 it produces") does not work: forwardAuth
+    # short-circuits the whole middleware chain on a non-2xx response, so anything listed AFTER
+    # it never runs at all, including this errors middleware. Listing errors first makes it wrap
+    # forwardAuth's own response instead - it's the one thing in the chain forwardAuth's
+    # response has to pass back through.
+    traefik.ingress.kubernetes.io/router.middlewares: >-
+      {{ .Release.Namespace }}-{{ .Release.Name }}-oidc-redirect@kubernetescrd,{{ .Release.Namespace }}-{{ .Values.authGateway.traefik.middlewareName }}@kubernetescrd
+spec:
+  ingressClassName: itl-traefik
+  tls:
+    - hosts: [{{ .Values.webapp.host | quote }}]
+      secretName: {{ .Release.Name }}-webapp-tls
+  rules:
+    - host: {{ .Values.webapp.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}
+                port:
+                  number: 8080

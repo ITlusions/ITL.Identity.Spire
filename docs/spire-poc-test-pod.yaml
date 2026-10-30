@@ -1,0 +1,59 @@
+# Throwaway PoC pod (docs/2026-10-29-first-workload-poc.md step 1). Not a
+# Helm template on purpose - this is a one-off, manually applied and
+# manually removed resource, not something ArgoCD/Helm should track.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-poc
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spire-poc-test
+  namespace: spire-poc
+  labels:
+    app: spire-poc-test
+spec:
+  containers:
+    - name: spiffe-helper
+      image: ghcr.io/spiffe/spiffe-helper:0.11.0
+      args: ["-config", "/etc/spiffe-helper.conf", "-daemon-mode=true"]
+      volumeMounts:
+        - mountPath: /spiffe-workload-api
+          name: spiffe-workload-api
+          readOnly: true
+        - mountPath: /etc/spiffe-helper.conf
+          name: spiffe-helper-config
+          readOnly: true
+          subPath: spiffe-helper.conf
+        - mountPath: /certs
+          name: certs
+    - name: sleep
+      image: busybox:1.37.0
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - mountPath: /certs
+          name: certs
+  volumes:
+    - name: spiffe-workload-api
+      csi:
+        driver: csi.spiffe.io
+        readOnly: true
+    - name: spiffe-helper-config
+      configMap:
+        name: spire-poc-test-config
+    - name: certs
+      emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-poc-test-config
+  namespace: spire-poc
+data:
+  spiffe-helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cert_dir = "/certs"
+    svid_file_name = "tls.crt"
+    svid_key_file_name = "tls.key"
+    svid_bundle_file_name = "ca.pem"

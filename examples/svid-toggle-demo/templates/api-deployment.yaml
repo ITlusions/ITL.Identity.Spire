@@ -1,0 +1,176 @@
+{{- if .Values.svid.enabled }}
+# The API: authenticates its own callers via JWT-SVID (Authorization: Bearer <token>, checked
+# against the audience it expects), and authenticates itself to Postgres via the X.509 client
+# certificate ITL.CertManager.CA issues (client-cert below) - two different SVID types, one per
+# hop, each used where it actually fits. JWT-SVID is a natural fit for "prove who's calling this
+# HTTP endpoint"; the cert-manager cert is what CNPG's clientcert=verify-full understands, and a
+# SPIFFE X.509-SVID was never going to satisfy that (see client-certificate.yaml's own comment on
+# why - clientCASecret trusts a specific CA that isn't SPIRE's root).
+#
+# ITL.Kyverno's spiffe-helper-inject annotation (below) also gives this pod its own SPIFFE
+# X.509-SVID anyway - not for Postgres, which stays on the cert-manager cert, but so this
+# workload carries a real SPIFFE identity too via the same reusable mechanism every other
+# annotation-opted-in workload uses, rather than hand-rolling a second, one-off spiffe-helper
+# config just for this chart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}-api
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}-api
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        spiffe.itlusions.local/inject: "true"
+    spec:
+      securityContext:
+        fsGroup: {{ .Values.svid.gid }}
+      volumes:
+        {{/*
+        No spiffe-workload-api/SPIFFE-X.509-SVID volume here - the API's hop to Postgres uses
+        ITL.CertManager.CA's cert-manager-issued client certificate (client-cert below), the
+        exact same one db-check used before this Deployment took over DB access. "X.509" for
+        this hop means that cert-manager certificate specifically, not a SPIFFE X.509-SVID - the
+        two are unrelated CAs (see client-certificate.yaml's own comment on why a SPIRE SVID was
+        never going to satisfy CNPG's clientCASecret here).
+        */}}
+        - name: client-cert
+          secret:
+            secretName: {{ .Release.Name }}-db-client-cert
+            defaultMode: 0640
+        {{/*
+        server-ca verifies the *server's* own certificate (PGSSLROOTCERT) - CNPG's own
+        auto-generated CA for that purpose (serverCASecret is never overridden by this chart),
+        NOT db-combined-client-ca (which only ever signs *client* certs). Confirmed live: using
+        the wrong secret here produces "SSL error: certificate verify failed" on the CLIENT side
+        - a copy-paste mistake from an earlier version of this file, same gotcha
+        webapp-deployment.yaml's own comment on this exact volume already documents.
+        */}}
+        - name: server-ca
+          secret:
+            secretName: {{ .Release.Name }}-db-ca
+      initContainers:
+        - name: wait-for-db
+          image: postgres:16-alpine
+          securityContext:
+            runAsUser: {{ .Values.svid.uid }}
+            runAsGroup: {{ .Values.svid.gid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          env:
+            - {name: PGHOST, value: "{{ .Release.Name }}-db-rw"}
+            - {name: PGDATABASE, value: "{{ .Values.database.name }}"}
+            - {name: PGUSER, value: "{{ .Values.database.owner }}"}
+            - {name: PGSSLMODE, value: verify-full}
+            - {name: PGSSLCERT, value: /client-cert/tls.crt}
+            - {name: PGSSLKEY, value: /client-cert/tls.key}
+            - {name: PGSSLROOTCERT, value: /certs-server-ca/ca.crt}
+          command: ["sh", "-c", "until pg_isready; do echo waiting for db; sleep 2; done"]
+          volumeMounts:
+            - {name: client-cert, mountPath: /client-cert, readOnly: true}
+            - {name: server-ca, mountPath: /certs-server-ca, readOnly: true}
+      containers:
+        - name: api
+          image: python:3.12-alpine
+          securityContext:
+            runAsUser: {{ .Values.svid.uid }}
+            runAsGroup: {{ .Values.svid.gid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          ports:
+            - containerPort: 8081
+          env:
+            - {name: PGHOST, value: "{{ .Release.Name }}-db-rw"}
+            - {name: PGDATABASE, value: "{{ .Values.database.name }}"}
+            - {name: PGUSER, value: "{{ .Values.database.owner }}"}
+            - {name: PGSSLMODE, value: verify-full}
+            - {name: PGSSLCERT, value: /client-cert/tls.crt}
+            - {name: PGSSLKEY, value: /client-cert/tls.key}
+            - {name: PGSSLROOTCERT, value: /certs-server-ca/ca.crt}
+            - {name: JWT_AUDIENCE, value: {{ .Values.api.jwtAudience | quote }}}
+            # pip install (below) defaults to a per-user site path under $HOME ("/.local") when
+            # it can't write the global site-packages - confirmed live, with no $HOME set for
+            # this uid it falls back to "/" itself, which isn't writable either:
+            # "Permission denied: '/.local'". /tmp is writable regardless of uid.
+            - {name: HOME, value: /tmp}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --quiet --no-cache-dir psycopg2-binary
+              python3 -c "
+              import http.server, json, base64, time, os, psycopg2
+
+              AUDIENCE = os.environ['JWT_AUDIENCE']
+
+              def decode_jwt_claims(token):
+                  # Decode only, same as the frontend's own /whoami did before this endpoint
+                  # existed - this demo does not verify the JWT-SVID's signature against
+                  # SPIRE's trust bundle, only its claims (audience, expiry). A real relying
+                  # party fetches the trust domain's JWKS via the Workload API and actually
+                  # verifies the signature - skipped here to keep this demo's own code short,
+                  # not because it would be hard to add.
+                  payload = token.split('.')[1]
+                  payload += '=' * (-len(payload) % 4)
+                  return json.loads(base64.urlsafe_b64decode(payload))
+
+              def authenticate(headers):
+                  auth = headers.get('Authorization', '')
+                  if not auth.startswith('Bearer '):
+                      return None, 'missing Bearer token'
+                  try:
+                      claims = decode_jwt_claims(auth[7:])
+                  except Exception:
+                      return None, 'malformed JWT'
+                  if AUDIENCE not in claims.get('aud', []):
+                      return None, 'wrong audience: %s' % claims.get('aud')
+                  if claims.get('exp', 0) < time.time():
+                      return None, 'expired'
+                  return claims, None
+
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      claims, err = authenticate(self.headers)
+                      if err:
+                          self.send_response(401)
+                          self.end_headers()
+                          self.wfile.write(('JWT-SVID auth failed: %s' % err).encode())
+                          return
+                      if self.path == '/whoami':
+                          body = json.dumps({'called_by': claims['sub']}).encode()
+                      elif self.path == '/data':
+                          conn = psycopg2.connect()   # libpq env vars above - the X.509-SVID-equivalent cert-manager cert
+                          cur = conn.cursor()
+                          cur.execute('select current_user, now()')
+                          row = cur.fetchone()
+                          conn.close()
+                          body = json.dumps({
+                              'called_by': claims['sub'],
+                              'db_user': row[0],
+                              'db_time': str(row[1]),
+                          }).encode()
+                      else:
+                          self.send_response(404)
+                          self.end_headers()
+                          return
+                      self.send_response(200)
+                      self.send_header('Content-Type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(body)
+
+              http.server.HTTPServer(('0.0.0.0', 8081), Handler).serve_forever()
+              "
+          volumeMounts:
+            - {name: client-cert, mountPath: /client-cert, readOnly: true}
+            - {name: server-ca, mountPath: /certs-server-ca, readOnly: true}
+{{- end }}

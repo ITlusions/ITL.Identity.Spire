@@ -1,0 +1,22 @@
+apiVersion: v2
+name: itl-identity-spire
+description: >-
+  Thin wrapper around the upstream spiffe/helm-charts-hardened "spire" chart
+  for the ITL Talos cluster - cryptographic workload identity (X.509-SVID /
+  JWT-SVID) issued per-pod via Kubernetes node attestation, independent of
+  Keycloak. Keycloak stays the human/user identity provider (SSO, OIDC);
+  SPIRE is the workload-to-workload identity layer. Unlike the other
+  ITL.* app charts (ITL.Headscale, ITL.Wireguard, ...), this one does NOT
+  hand-roll its own server/agent manifests - it tracks upstream's own
+  hardened chart as a dependency and only overrides what's cluster-specific
+  (trust domain, cluster name, storage class). The CRDs chart (spire-crds)
+  is installed separately, per upstream's own documented two-release
+  process - see README, not bundled here as a Chart.yaml dependency.
+type: application
+version: 0.1.0
+appVersion: "1.15.5"
+
+dependencies:
+  - name: spire
+    version: "0.30.4"   # current as of 2026-10-25 per spiffe.github.io/helm-charts-hardened/index.yaml - re-check before `helm dependency update` if this sits unreleased for a while
+    repository: "https://spiffe.github.io/helm-charts-hardened/"

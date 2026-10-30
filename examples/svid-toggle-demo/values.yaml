@@ -1,0 +1,86 @@
+# The one toggle this example exists to demonstrate. Flip it and redeploy -
+# nothing else needs to change for the webapp to switch between password-only
+# and SVID-backed mTLS to its own database.
+svid:
+  enabled: false
+
+  # SVID injection is entirely ITL.Kyverno's spiffe-helper-inject
+  # ClusterPolicy's job, triggered by one pod annotation - this chart
+  # renders no sidecar/volumes/initContainer of its own at all. That
+  # policy must be enabled on the cluster (disabled by default as of
+  # 2026-10-29) for svid.enabled: true to actually do anything; if it
+  # isn't, every container below still renders exactly as if SVID were
+  # on, but there is no cert for anything to actually read.
+
+  # Must match the trust domain ITL.Identity.Spire issues for (see that
+  # chart's own values.yaml) and the className its controller-manager is
+  # configured with - a mismatched className is silently ignored
+  # (watchClassless: false), not an error. Confirmed live the hard way.
+  trustDomain: itlusions.local
+  className: itl-spire-spire
+
+  # uid/gid every container in this chart runs as. Must match
+  # ITL.Kyverno's own policies.spiffeHelperInject.uid/gid (its default is
+  # 1000, matching this) - if they ever diverge, the injected sidecar
+  # writes tls.key unreadable by this chart's own containers, the same
+  # file-permission bug ITL.Openproject.fork hit when spiffe-helper ran
+  # as root by default.
+  uid: 1000
+  gid: 1000
+
+  # The ClusterIssuer the actual Postgres client certificate (client-certificate.yaml) is issued
+  # from - ITL.CertManager.CA's database-client intermediate specifically (not its workload
+  # intermediate, a separate trust boundary - see that chart's own values.yaml comment on why it
+  # has more than one intermediate). Deliberately a separate, cert-manager-issued certificate, not
+  # the SPIRE SVID the Kyverno-injected sidecar writes - see client-certificate.yaml for why those
+  # can't be the same thing once CNPG's clientCASecret trusts a different CA than SPIRE's root.
+  certManagerIssuer: itl-database-client-ca-issuer
+  certManagerCASecret: itl-database-client-ca   # the Secret sync-ca-job.yaml copies out of cert-manager's namespace
+
+# image/replicaCount are the original fields; host is for the new Keycloak-login Ingress
+# (webapp-ingress.yaml) via ITL.AuthGateway (a library chart - see that repo, this example is
+# its first real consumer). Protects only the webapp's own route; the api and the
+# JWT-SVID/X.509 chains above are completely separate concerns this does not touch.
+webapp:
+  image: nginxinc/nginx-unprivileged:1.27-alpine   # already runs as uid 101 by default - overridden to svid.uid below for this demo
+  replicaCount: 1
+  host: svid-demo.itlusions.com   # no real DNS entry - test with curl --resolve or a Host header against Traefik's own LoadBalancer IP
+
+database:
+  name: svid-toggle-demo
+  owner: svid-toggle-demo
+  storageClass: ha-gen-lh
+  storageSize: 1Gi
+
+authGateway:
+  oauth2Proxy:
+    oidcIssuerUrl: "https://sts.itlusions.com/realms/itlusions"
+    # webapp-ingress.yaml requests a real Let's Encrypt cert (letsencrypt-issuer, DNS-01 via
+    # this cluster's existing TransIP webhook, the same pattern every other app here uses) for
+    # webapp.host - a real browser-trusted cert, so cookies can be marked Secure.
+    cookieSecure: true
+    clientSecretRef:
+      name: svid-toggle-demo-oauth2-proxy-secret   # built by templates/oauth2-proxy-secret-job.yaml, not pre-created by hand
+  traefik:
+    middlewareName: svid-toggle-demo-oidc-auth
+  keycloak:
+    enabled: true
+    keycloakCRName: itl-keycloak
+    realm: itlusions
+    clientId: svid-toggle-demo
+    namespace: itl-keycloak   # the Keycloak CR's own namespace, not this release's
+    displayName: "SVID toggle demo"
+    description: "ITL.Identity.Spire example - Keycloak login on the frontend"
+    redirectUris:
+      - "https://svid-demo.itlusions.com/oauth2/callback"
+    webOrigins:
+      - "https://svid-demo.itlusions.com"
+    clientSecretRef:
+      name: svid-toggle-demo-oidc-secret   # auto-created by the Keycloak Operator, confirmed live against an existing client (openproject-lab) - this chart does not create it
+
+# A second, simple workload (api-deployment.yaml) demonstrating JWT-SVID specifically - a
+# different SPIFFE identity format from the X.509-SVID the webapp/db-check path above uses.
+api:
+  # Audience the issued JWT-SVID is scoped to - arbitrary for this demo, but a real relying
+  # party would check this exact value when validating a token presented to it.
+  jwtAudience: svid-toggle-demo-api

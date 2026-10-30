@@ -1,0 +1,22 @@
+apiVersion: v2
+name: svid-toggle-demo
+description: >-
+  Minimal example: a webapp + a CNPG Postgres database, where SVID-backed
+  mTLS to the database is a single values.yaml toggle (svid.enabled). Exists
+  to demonstrate the pattern cleanly - every hard-won lesson from getting
+  this working for real in ITL.Openproject.fork, without that chart's
+  unrelated complexity (licensing, Keycloak, RBAC jobs). See this folder's
+  README for what each lesson was and why it's here.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+dependencies:
+  # Local path, not a chart-repo reference - ITL.AuthGateway is unreleased (no published repo
+  # yet) and this example is this library chart's FIRST real consumer, confirmed live. Fragile
+  # by nature: assumes both repos are checked out as siblings under the same parent directory
+  # (../../../ from here, i.e. D:\repos\ on this machine) - fine for this example's own purpose,
+  # not something a real consumer elsewhere should copy once ITL.AuthGateway publishes properly.
+  - name: itl-authgateway
+    version: "0.1.0"
+    repository: "file://../../../ITL.AuthGateway/chart"

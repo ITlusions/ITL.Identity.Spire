@@ -1,0 +1,9 @@
+{{ include "itl-authgateway.oauth2proxy.deployment" . }}
+---
+{{ include "itl-authgateway.oauth2proxy.service" . }}
+---
+{{ include "itl-authgateway.middleware" . }}
+{{- if .Values.authGateway.keycloak.enabled }}
+---
+{{ include "itl-authgateway.keycloakoidcclient" . }}
+{{- end }}

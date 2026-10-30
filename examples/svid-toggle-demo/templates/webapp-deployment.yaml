@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.webapp.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{/*
+      fsGroup, not just the per-container runAsGroup below - confirmed live this is load-bearing:
+      without it, Secret-mounted files are owned group "root" regardless of defaultMode's
+      permission bits, so a 0640 file is still unreadable by this pod's own uid/gid (1000:1000),
+      which isn't in the root group. fsGroup is what actually makes Kubernetes chgrp the mounted
+      files to match this pod, not merely set their permission bits.
+      */}}
+      securityContext:
+        fsGroup: {{ .Values.svid.gid }}
+      {{- if .Values.svid.enabled }}
+      volumes:
+        # JWT-SVID, not the X.509 SVID the api Deployment's own spiffe-helper-inject annotation
+        # gets - the frontend's only job is calling the api over HTTP, which is exactly what a
+        # JWT-SVID (a bearer token, not a client certificate) fits. Hand-rolled, not
+        # ITL.Kyverno's spiffe-helper-inject annotation - that policy's own config only ever
+        # fetches an X.509-SVID (see its own templates/spiffe-helper-inject.yaml), not a JWT one.
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        - name: jwt-helper-config
+          configMap:
+            name: {{ .Release.Name }}-jwt-helper-config
+        - name: jwt-svid
+          emptyDir: {}
+      {{- end }}
+      initContainers:
+        {{- if .Values.svid.enabled }}
+        - name: jwt-svid-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.11.0
+          restartPolicy: Always
+          securityContext:
+            runAsUser: {{ .Values.svid.uid }}
+            runAsGroup: {{ .Values.svid.gid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          args: ["-config", "/etc/spiffe-helper.conf", "-daemon-mode=true"]
+          volumeMounts:
+            - {name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true}
+            - {name: jwt-helper-config, mountPath: /etc/spiffe-helper.conf, subPath: spiffe-helper.conf, readOnly: true}
+            - {name: jwt-svid, mountPath: /jwt-svid}
+        {{- end }}
+      containers:
+        - name: webapp
+          image: python:3.12-alpine
+          securityContext:
+            runAsUser: {{ .Values.svid.uid }}
+            runAsGroup: {{ .Values.svid.gid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          ports:
+            - containerPort: 8080
+          env:
+            - {name: API_URL, value: "http://{{ .Release.Name }}-api:8081"}
+            - {name: SVID_ENABLED, value: {{ .Values.svid.enabled | quote }}}
+          {{- if .Values.svid.enabled }}
+          volumeMounts:
+            - {name: jwt-svid, mountPath: /jwt-svid, readOnly: true}
+          {{- end }}
+          command: ["python3", "-c"]
+          args:
+            - |
+              import http.server, urllib.request, json, os
+
+              API_URL = os.environ["API_URL"]
+              SVID_ENABLED = os.environ["SVID_ENABLED"] == "true"
+
+              def call_api(path):
+                  # The frontend's whole reason for having a JWT-SVID: present it as a bearer
+                  # token so the api (api-deployment.yaml) can authenticate THIS caller,
+                  # independent of whatever authenticates the api's own hop to Postgres.
+                  req = urllib.request.Request(API_URL + path)
+                  if SVID_ENABLED:
+                      token = open("/jwt-svid/jwt_svid.token").read().strip()
+                      req.add_header("Authorization", "Bearer " + token)
+                  with urllib.request.urlopen(req, timeout=5) as resp:
+                      return resp.status, resp.read().decode()
+
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path != "/":
+                          self.send_response(404)
+                          self.end_headers()
+                          return
+                      try:
+                          status, body = call_api("/data")
+                          result = "api responded %d: %s" % (status, body)
+                      except Exception as e:
+                          result = "api call failed: %s" % e
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/plain")
+                      self.end_headers()
+                      self.wfile.write(result.encode())
+
+              http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080

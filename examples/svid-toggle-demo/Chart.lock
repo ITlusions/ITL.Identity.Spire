@@ -1,0 +1,6 @@
+dependencies:
+- name: itl-authgateway
+  repository: file://../../../ITL.AuthGateway/chart
+  version: 0.1.0
+digest: sha256:7015614da50a60bdc247b48b7813971df3684efcd8265ec7ec77e34985300bf6
+generated: "2026-10-30T01:22:53.9261017+01:00"

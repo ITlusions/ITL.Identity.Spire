@@ -1,0 +1,146 @@
+# Overrides for the upstream "spire" dependency only - every key not set
+# here keeps upstream's own default (see
+# https://github.com/spiffe/helm-charts-hardened/blob/spire-0.30.4/charts/spire/values.yaml
+# for the full set). This file is deliberately short - that's the point of
+# wrapping instead of hand-rolling: upstream owns the manifests, we only
+# own the handful of values that are actually cluster-specific.
+spire:
+  global:
+    spire:
+      # SPIFFE trust domain - deliberately NOT a resolvable public hostname
+      # (SPIFFE trust domains don't need to be). This is the permanent root
+      # of every SVID this cluster issues - confirm before first deploy,
+      # changing it later means re-issuing every workload identity.
+      # "itlusions.local" marks this cluster specifically, distinct from
+      # any other ITL cluster that might run its own SPIRE server with its
+      # own trust domain.
+      trustDomain: "itlusions.local"
+
+      # Must match however this Talos cluster identifies itself to the
+      # k8s_psat NodeAttestor - placeholder, confirm before relying on it
+      # for node attestation.
+      clusterName: "itl-talos"
+
+      namespaces:
+        create: true
+
+      persistence:
+        # ha-gen-lh, not ha-secure-lh - see ITL.Wireguard/ITL.Headscale
+        # README for why (broken Longhorn StorageClass parameter on this
+        # cluster, confirmed 2026-10-23, unrelated to this chart).
+        storageClass: "ha-gen-lh"
+
+  spire-server:
+    # CA certificate's own subject (not the leaf-SVID subject, which stays
+    # at SPIRE's own default "O=SPIRE, C=US" - that one isn't exposed by
+    # this chart or the ClusterSPIFFEID CRD, see docs discussion). This
+    # only identifies this trust domain's root CA as ITlusions, NL.
+    caSubject:
+      country: NL
+      organization: ITlusions
+      commonName: itlusions.local
+
+    # Enabled by default upstream - kept explicit here since it's the
+    # mechanism this org would use later to manage registration entries as
+    # CRDs/manifests (matching this org's GitOps pattern) instead of
+    # one-off `spire-server entry create` CLI calls.
+    controllerManager:
+      enabled: true
+      identities:
+        clusterSPIFFEIDs:
+          # Upstream's own catch-all ClusterSPIFFEID: an empty
+          # namespaceSelector matches every namespace/serviceaccount in the
+          # cluster, so leaving this at its upstream default (enabled)
+          # auto-registers every existing and future workload the moment
+          # the controller-manager starts - confirmed live, it produced 98
+          # registration entries within minutes of first install, for
+          # workloads that never asked for an identity (Longhorn, Forgejo,
+          # Keycloak, Matrix, Nextcloud, OpenProject, MetalLB, CNPG, ...).
+          #
+          # Re-enabled 2026-10-29, deliberately, reversing the above: chosen
+          # over ITL.Kyverno's annotation-driven spiffe-helper-inject policy
+          # (now disabled there) as the more transparent mechanism -
+          # registration via this default is native, visible SPIRE state
+          # (`spire-server entry show`), not an admission-time mutation a
+          # reader has to know Kyverno exists to find. Every workload now
+          # gets an identity *issued* automatically again; nothing
+          # auto-injects the spiffe-helper sidecar that turns that identity
+          # into usable files - each consuming app's own chart still does
+          # that explicitly (see ITL.Openproject.fork), same as before.
+          default:
+            enabled: true
+            # Added 2026-10-29: makes the leaf SVID's CN match the issuing
+            # workload's own app.kubernetes.io/name label, cluster-wide -
+            # SPIRE always overwrites the CN with DNSNames[0] whenever any
+            # DNS name is set (confirmed in SPIRE's own
+            # pkg/server/credtemplate/builder.go). This is the same trick
+            # ITL.Openproject.fork's own ClusterSPIFFEID uses
+            # (dnsNameTemplates: ["openproject"], hardcoded to one app) to
+            # make Postgres' clientcert=verify-full - which matches on CN,
+            # not SAN-URI - usable, but applied here generically via every
+            # workload's own label instead of one hardcoded name per app.
+            # Any pod missing that label gets a podEntryRenderFailure for
+            # just that one entry (visible in `kubectl get clusterspiffeid
+            # itl-spire-spire-default -o yaml`'s .status.stats), not a
+            # cluster-wide failure.
+            # First attempt (same day) used a bare
+            # '{{ index .PodMeta.Labels "app.kubernetes.io/name" }}' - confirmed live, it
+            # broke 33 real workloads (Longhorn among them) that don't carry that label:
+            # the template renders to an empty string rather than failing to render, and
+            # SPIRE server then rejects the WHOLE entry update outright ("rpc error: code
+            # = InvalidArgument desc = failed to convert entry: invalid DNS name: empty or
+            # only whitespace") - not a soft per-entry render failure
+            # (podEntryRenderFailures stayed 0 throughout; this showed up as
+            # status.stats.entryFailures instead), so those 33 workloads briefly lost
+            # their identity update entirely, not just the DNS name. Fixed with an
+            # if/else fallback so the template can never render empty.
+            #
+            # Namespace-prefixed, not app.kubernetes.io/name alone: confirmed live that
+            # label alone collides across unrelated workloads - forgejo-db, matrix-synapse-db,
+            # mas-db and nextcloud-db (all separate CNPG Postgres clusters, different
+            # namespaces) all carry app.kubernetes.io/name=postgresql. Harmless today (nothing
+            # else uses CN-based cert auth yet besides ITL.Openproject.fork, which sets its own
+            # explicit dnsNameTemplates and isn't affected), but the same
+            # SPIFFE-ID-already-uses-this-exact-pattern (ns/{namespace}/sa/{serviceaccount})
+            # reasoning that makes the SPIFFE ID itself collision-free applies here too -
+            # giving the CN the same namespace-scoping removes the collision structurally
+            # instead of relying on it staying harmless by luck.
+            dnsNameTemplates:
+              - '{{ .PodMeta.Namespace }}-{{ if index .PodMeta.Labels "app.kubernetes.io/name" }}{{ index .PodMeta.Labels "app.kubernetes.io/name" }}{{ else }}workload{{ end }}'
+
+  spire-agent:
+    enabled: true
+
+# Declarative registration entries, rendered as ClusterSPIFFEID CRDs by
+# templates/clusterspiffeid.yaml - the GitOps-friendly alternative to the
+# one-off `spire-server entry create` CLI call in the README. Empty by
+# default: this chart is infrastructure-only until something actually
+# needs an SVID (see README "Open items" - no consumer wired up yet).
+#
+# Each item maps close to 1:1 onto ClusterSPIFFEID's own spec fields
+# (spire-controller-manager CRD) - only `name` and `spiffeIDTemplate` are
+# required by this template, everything else is optional and passed
+# through as-is. Example, commented out, translating the README's CLI
+# fallback for a single namespace+serviceaccount workload into a CRD:
+#
+# registrationEntries:
+#   - name: example-workload
+#     spiffeIDTemplate: "spiffe://itlusions.local/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+#     podSelector:
+#       matchLabels:
+#         spiffe.io/svid: "true"
+#     namespaceSelector:
+#       matchLabels:
+#         kubernetes.io/metadata.name: example-namespace
+registrationEntries:
+  # Throwaway PoC (docs/2026-10-29-first-workload-poc.md step 1), proving
+  # the SPIFFE chain end-to-end before touching any real workload. Remove
+  # this entry once docs/2026-10-29-first-workload-poc.md step 2 is done.
+  - name: spire-poc-test
+    spiffeIDTemplate: "spiffe://itlusions.local/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+    podSelector:
+      matchLabels:
+        app: spire-poc-test
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: spire-poc

@@ -1,0 +1,34 @@
+# Grants every authenticated identity in the cluster read-only access to this trust domain's own
+# root CA bundle (the spire-bundle ConfigMap, upstream's own "bundleConfigMap" default - see
+# spire-server's values.yaml). This is deliberately broad (system:authenticated, not scoped to a
+# namespace or a specific ServiceAccount) because the bundle is a public root CA certificate, the
+# same as any TLS root CA - there is nothing to protect by restricting who can read it, and
+# restricting it would only get in the way of every future workload that needs to verify an SVID
+# issued by this trust domain without first getting its own bespoke RBAC grant.
+#
+# Added 2026-10-29 specifically so a consuming chart's own post-install hook Job (see
+# examples/svid-toggle-demo in this repo) can fetch this bundle to combine it with a CNPG
+# Cluster's own client CA, without that chart needing its own cross-namespace RBAC for every
+# namespace it might ever be installed into.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-bundle-reader
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["spire-bundle"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-bundle-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-bundle-reader
+subjects:
+  - kind: Group
+    name: system:authenticated
+    apiGroup: rbac.authorization.k8s.io

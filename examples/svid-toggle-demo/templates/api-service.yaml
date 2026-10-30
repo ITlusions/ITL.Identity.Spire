@@ -1,0 +1,13 @@
+{{- if .Values.svid.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-api
+spec:
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}-api
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 8081
+      targetPort: 8081
+{{- end }}

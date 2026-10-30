@@ -1,0 +1,27 @@
+{{- if .Values.svid.enabled }}
+# The actual certificate db-check presents to Postgres for clientcert=verify-full. Issued by
+# ITL.CertManager.CA's database-client intermediate - NOT the SPIRE SVID the
+# Kyverno-injected spiffe-helper sidecar writes to /certs. Those are two unrelated CAs: CNPG's
+# clientCASecret (cnpg-cluster.yaml) now trusts the cert-manager intermediate, so a client
+# certificate still has to actually come from that same CA to be trusted - a SPIRE-issued SVID
+# would be correctly rejected, signed by an entirely different root.
+#
+# The SPIFFE/Kyverno sidecar is still injected (same annotation as always) and still
+# demonstrates that part of the pattern independently - it's just not what authenticates to
+# Postgres in this particular variant of the demo.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-db-client
+spec:
+  commonName: {{ .Values.database.owner | quote }}
+  secretName: {{ .Release.Name }}-db-client-cert
+  duration: 2160h   # 90 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ .Values.svid.certManagerIssuer }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}

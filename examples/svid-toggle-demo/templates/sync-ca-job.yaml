@@ -1,0 +1,126 @@
+{{- if .Values.svid.enabled }}
+# Replaces the old "wait for CNPG to generate its own CA, then combine it with something else"
+# dance entirely - ITL.CertManager.CA's database-client intermediate CA (not its workload
+# intermediate - a separate trust boundary in that chart, see its own docs) is provided to CNPG
+# as its clientCASecret from the START (pre-install, before the Cluster resource is ever
+# created), so CNPG never auto-generates a CA of its own in the first place. This Job's only job
+# is copying that CA's cert+key into this namespace, since Secrets can't be referenced
+# cross-namespace.
+#
+# Deliberately NOT a cluster-wide-readable secret the way ITL.Identity.Spire's spire-bundle is
+# (see that chart's bundle-reader-rbac.yaml) - this CA secret carries a real private key, not a
+# public root cert, so this Job's ServiceAccount gets a narrow, explicit RoleBinding into
+# cert-manager's own namespace for exactly this one secret, not a blanket grant.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-sync-ca
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      serviceAccountName: {{ .Release.Name }}-sync-ca
+      restartPolicy: Never
+      containers:
+        - name: sync-ca
+          image: alpine/k8s:1.37.1   # matches this cluster's actual server version, confirmed 2026-10-30
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "Copying ITL.CertManager.CA's database-client CA into {{ .Release.Namespace }}..."
+              kubectl get secret {{ .Values.svid.certManagerCASecret }} -n cert-manager -o json \
+                | jq '{apiVersion, kind, type: "Opaque", data: {"ca.crt": .data["ca.crt"], "ca.key": .data["ca.key"]}, metadata: {name: "{{ .Release.Name }}-db-combined-client-ca", namespace: "{{ .Release.Namespace }}"}}' \
+                | kubectl apply -f -
+              echo "Done."
+---
+# Hook-annotated too, not plain templates - confirmed live this is not optional: Helm applies
+# pre-install/pre-upgrade hooks BEFORE the release's ordinary manifest set, so without this, the
+# Job above tries to start with a serviceAccountName that doesn't exist yet (its ServiceAccount
+# would only be created afterwards, as part of the main manifests). A lower hook-weight than the
+# Job (-20 vs. -10) makes these run strictly first.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-sync-ca
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-sync-ca
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ .Release.Name }}-db-combined-client-ca"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-sync-ca
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-sync-ca
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-sync-ca
+---
+# Cross-namespace: narrow read on exactly one secret in cert-manager's own namespace, nothing
+# else there. This RoleBinding lives in cert-manager's namespace, not this release's own -
+# requires whoever runs `helm install` to have rights there too (true for a cluster admin, not
+# true for a restricted per-namespace deploy identity - a real scaling limit of this approach,
+# not hidden here).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-read-database-client-ca
+  namespace: cert-manager
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.svid.certManagerCASecret | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-read-database-client-ca
+  namespace: cert-manager
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-sync-ca
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-read-database-client-ca
+{{- end }}

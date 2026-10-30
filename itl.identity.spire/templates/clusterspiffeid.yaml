@@ -1,0 +1,75 @@
+{{/*
+Declarative registration entries, as spire-controller-manager's own
+ClusterSPIFFEID CRD - the GitOps-friendly alternative to one-off
+`spire-server entry create` CLI calls (see README "Open items").
+
+This wrapper does not reshape the CRD's own fields: each item under
+`.Values.registrationEntries` maps close to 1:1 onto ClusterSPIFFEID's
+spec, matching this chart's own stated philosophy (own the handful of
+cluster-specific values, don't re-implement upstream's surface). The one
+thing added here is rendering nothing at all when the list is empty, so
+an unconfigured deploy doesn't ship a broken/empty CRD.
+
+Requires the spire-controller-manager (enabled via
+`spire.spire-server.controllerManager.enabled`, already on by default in
+values.yaml) and the spire-crds release installed first - see README
+"Deploy".
+*/}}
+{{- $root := . }}
+{{- range .Values.registrationEntries }}
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ .name | required "each registrationEntries item needs a name" }}
+spec:
+  # Required: the controller-manager runs with watchClassless: false
+  # (confirmed live against its own configmap), so a ClusterSPIFFEID
+  # without this field is silently ignored - no entry, no error, the
+  # workload just never gets an identity. Matches the controller-manager's
+  # own naming (<release-namespace>-<release-name>), same as upstream's
+  # own ClusterSPIFFEID templates use.
+  className: {{ printf "%s-%s" $root.Release.Namespace $root.Release.Name | quote }}
+  spiffeIDTemplate: {{ .spiffeIDTemplate | required (printf "registrationEntries[%s]: spiffeIDTemplate is required by the CRD" .name) | quote }}
+  {{- with .podSelector }}
+  podSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .workloadSelectorTemplates }}
+  workloadSelectorTemplates:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .dnsNameTemplates }}
+  dnsNameTemplates:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .federatesWith }}
+  federatesWith:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if hasKey . "autoPopulateDNSNames" }}
+  autoPopulateDNSNames: {{ .autoPopulateDNSNames }}
+  {{- end }}
+  {{- if hasKey . "admin" }}
+  admin: {{ .admin }}
+  {{- end }}
+  {{- if hasKey . "downstream" }}
+  downstream: {{ .downstream }}
+  {{- end }}
+  {{- if hasKey . "fallback" }}
+  fallback: {{ .fallback }}
+  {{- end }}
+  {{- with .hint }}
+  hint: {{ . | quote }}
+  {{- end }}
+  {{- with .ttl }}
+  ttl: {{ . | quote }}
+  {{- end }}
+  {{- with .jwtTtl }}
+  jwtTtl: {{ . | quote }}
+  {{- end }}
+{{- end }}

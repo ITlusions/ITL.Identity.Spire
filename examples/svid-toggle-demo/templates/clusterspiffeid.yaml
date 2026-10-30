@@ -1,0 +1,30 @@
+{{- if .Values.svid.enabled }}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ .Release.Name }}-webapp
+spec:
+  className: {{ .Values.svid.className | quote }}
+  spiffeIDTemplate: {{ printf "spiffe://%s/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}" .Values.svid.trustDomain | quote }}
+  # Namespace-prefixed, not the bare app name - the cluster-wide "default"
+  # ClusterSPIFFEID (ITL.Identity.Spire's own values.yaml) was changed to
+  # this same shape after confirming live that app.kubernetes.io/name
+  # alone collides across unrelated workloads (four separate CNPG
+  # Postgres clusters in different namespaces all happened to carry
+  # app.kubernetes.io/name=postgresql). This explicit, app-specific
+  # ClusterSPIFFEID doesn't strictly need that same protection today (one
+  # app, one namespace), but matching the convention costs nothing and
+  # avoids relying on "stays unique by luck".
+  dnsNameTemplates:
+    - "{{ .Release.Namespace }}-{{ .Release.Name }}"
+  # Matches on instance alone, not name too - the webapp and api Deployments
+  # (api-deployment.yaml) carry different app.kubernetes.io/name values
+  # ({{ .Chart.Name }} vs. {{ .Chart.Name }}-api) but both need this same identity. Namespace is
+  # already single-tenant for this demo, so instance alone is sufficient scoping.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+{{- end }}

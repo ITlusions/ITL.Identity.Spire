@@ -1,0 +1,30 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Release.Name }}-db
+spec:
+  instances: 1
+  storage:
+    size: {{ .Values.database.storageSize }}
+    storageClass: {{ .Values.database.storageClass }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.database.name }}
+      owner: {{ .Values.database.owner }}
+  {{- if .Values.svid.enabled }}
+  # ITL.CertManager.CA's database-client intermediate CA (not its workload
+  # intermediate - a separate trust boundary in that chart) is synced into
+  # this namespace by templates/sync-ca-job.yaml, a pre-install hook, and
+  # given here from the very start - CNPG never auto-generates its own
+  # client CA at all, since
+  # one already exists by the time this Cluster resource is created. This
+  # is what actually removed the old chicken-and-egg problem
+  # (ITL.Openproject.fork's own CNPG cluster hit it live: generating its
+  # own CA first, which then had to be patched after the fact to also
+  # trust SPIRE's root) - not a workaround for it.
+  certificates:
+    clientCASecret: {{ .Release.Name }}-db-combined-client-ca
+  postgresql:
+    pg_hba:
+      - hostssl {{ .Values.database.name }} {{ .Values.database.owner }} all cert clientcert=verify-full
+  {{- end }}
