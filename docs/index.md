@@ -22,3 +22,9 @@ are grouped into numbered folders, matching `ITL.Headscale/docs/`'s pattern - ea
   explicitly for cert-manager to pick up the host, and the live discovery document/JWKS response
   confirming this trust domain's actual signing keys. Groundwork for Keycloak JWT-SVID validation
   in a later phase - Keycloak and the demo chart are untouched here.
+- [1.4 Keycloak token exchange: trading a JWT-SVID for a Keycloak access token](1-operations/1.4-keycloak-token-exchange.md):
+  registering SPIRE's trust bundle as an `itlusions`-realm identity provider, the issuer-string
+  mismatch this uncovered between `trust.itlusions.com` and SPIRE's actual `iss` claim, why
+  Keycloak 26.8's RFC 7523 JWT Authorization Grant (not the `token-exchange` grant type) turned
+  out to be the real mechanism here, and the one credential-handling step still left for a human
+  to finish the live end-to-end verification.
