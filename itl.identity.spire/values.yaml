@@ -128,6 +128,58 @@ spire:
   spire-agent:
     enabled: true
 
+  # OIDC discovery provider - exposes the trust domain's JWKS/discovery document
+  # publicly so a relying party (Keycloak, in a later phase) can validate
+  # JWT-SVID signatures without talking to spire-server directly. Already a
+  # conditional dependency of upstream's own "spire" chart (same level as
+  # spire-server/spire-agent/tornjak-frontend above, condition:
+  # spiffe-oidc-discovery-provider.enabled), enabled by upstream's own default
+  # - confirmed live, the pod (spire-spiffe-oidc-discovery-provider) was
+  # already running before this wrapper ever set a value for it. Only the
+  # cluster-specific bits are overridden here: the public issuer URL and the
+  # Ingress that exposes it.
+  spiffe-oidc-discovery-provider:
+    # Overrides upstream's own default ("" -> https://oidc-discovery.<trustDomain>,
+    # i.e. https://oidc-discovery.itlusions.local - not a resolvable public
+    # hostname, since the trust domain itself deliberately isn't one, see
+    # global.spire.trustDomain's own comment above). This becomes the `issuer`
+    # field in the discovery document AND the `iss` claim SPIRE stamps into
+    # every JWT-SVID it mints - both must match the public hostname below for
+    # a relying party's OIDC discovery to work at all.
+    jwtIssuer: "https://trust.itlusions.com"
+    config:
+      # "use":"sig" on every JWK - upstream's own values.yaml calls this out
+      # by name as "required for Keycloak SPIFFE provider", which is exactly
+      # the later phase this is laying groundwork for.
+      setKeyUse: true
+    tls:
+      spire:
+        # Upstream's own default (true) wraps the provider's own listener in
+        # a SPIRE-issued (self-signed, this trust domain's own CA) serving
+        # cert - fine pod-to-pod, but Traefik can't terminate a public
+        # Let's-Encrypt-backed hostname in front of that without either
+        # passthrough (defeats the public cert) or a backend CA Traefik
+        # doesn't have. Disabled here so the provider instead runs the
+        # upstream-provided plain-HTTP nginx sidecar (insecureScheme.nginx,
+        # port 8080) behind the Service - same edge-TLS-only shape already
+        # used for Tornjak's own Ingress in this wrapper (see
+        # templates/tornjak-ingress.yaml), and appropriate here since this
+        # endpoint is meant to be public anyway. The trust bundle itself is
+        # still read from the CSI driver mount regardless of this setting -
+        # only the provider's own serving cert is affected.
+        enabled: false
+    ingress:
+      enabled: true
+      className: itl-traefik
+      host: "trust.itlusions.com"
+      # Required for cert-manager to provision a cert via the clusterIssuer
+      # annotation below - upstream's own ingress-spec helper only emits a
+      # `tls:` block's secretName when tlsSecret is set explicitly.
+      tlsSecret: "spire-trust-oidc-tls"
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-issuer
+        traefik.ingress.kubernetes.io/router.entrypoints: web, websecure
+
   # tornjak-frontend is itself a dependency of the upstream "spire" chart (same level as
   # spire-server/spire-agent above), not of this wrapper directly - confirmed live the hard
   # way: setting this as a top-level key in this file renders nothing at all, Helm only
