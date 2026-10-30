@@ -24,6 +24,21 @@ spire:
       namespaces:
         create: true
 
+      # The ONE place this must be set - spire-server and
+      # spiffe-oidc-discovery-provider each have their own LOCAL jwtIssuer
+      # value, and spire-lib's own helper template (spire-lib.jwt-issuer)
+      # checks global.spire.jwtIssuer FIRST, falling back to whichever
+      # subchart's local value only if this is empty. Setting only the
+      # discovery-provider's local value (an earlier mistake, confirmed
+      # live: the discovery document advertised this hostname while every
+      # actually-minted JWT-SVID still carried the untouched default,
+      # https://oidc-discovery.<trustDomain>, in its `iss` claim - two
+      # different strings, same signing key) never reaches spire-server at
+      # all, since each subchart's own .Values.jwtIssuer is a separate,
+      # unrelated value from this global one. Setting it HERE makes both
+      # subcharts agree, by design.
+      jwtIssuer: "https://trust.itlusions.com"
+
       persistence:
         # ha-gen-lh, not ha-secure-lh - see ITL.Wireguard/ITL.Headscale
         # README for why (broken Longhorn StorageClass parameter on this
@@ -139,14 +154,10 @@ spire:
   # cluster-specific bits are overridden here: the public issuer URL and the
   # Ingress that exposes it.
   spiffe-oidc-discovery-provider:
-    # Overrides upstream's own default ("" -> https://oidc-discovery.<trustDomain>,
-    # i.e. https://oidc-discovery.itlusions.local - not a resolvable public
-    # hostname, since the trust domain itself deliberately isn't one, see
-    # global.spire.trustDomain's own comment above). This becomes the `issuer`
-    # field in the discovery document AND the `iss` claim SPIRE stamps into
-    # every JWT-SVID it mints - both must match the public hostname below for
-    # a relying party's OIDC discovery to work at all.
-    jwtIssuer: "https://trust.itlusions.com"
+    # jwtIssuer is set at global.spire.jwtIssuer above, NOT here - see that
+    # key's own comment for why a local override on just this subchart
+    # doesn't reach spire-server's own separate local value (confirmed live,
+    # the actual root cause of the issuer-mismatch bug this replaced).
     config:
       # "use":"sig" on every JWK - upstream's own values.yaml calls this out
       # by name as "required for Keycloak SPIFFE provider", which is exactly
