@@ -1,0 +1,21 @@
+# The shared Postgres datastore SPIRE needs before `spire-server.replicaCount` can go above 1
+# (upstream's own values.yaml says so outright: "SPIRE server currently runs with a sqlite
+# database. Scaling to multiple instances will not work until we use an external database.").
+# Deliberately created BEFORE cutting spire-server over to it - additive, zero risk to the
+# live SQLite-backed server, which keeps running exactly as it is until the migration into
+# this cluster is proven against a copy of its data first.
+{{- if .Values.spirePostgres.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: spire-postgres
+spec:
+  instances: {{ .Values.spirePostgres.instances }}
+  storage:
+    size: {{ .Values.spirePostgres.storageSize }}
+    storageClass: {{ .Values.spirePostgres.storageClass }}
+  bootstrap:
+    initdb:
+      database: spire
+      owner: spire
+{{- end }}

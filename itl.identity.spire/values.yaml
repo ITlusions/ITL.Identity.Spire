@@ -46,6 +46,30 @@ spire:
         storageClass: "ha-gen-lh"
 
   spire-server:
+    # The actual HA switch - only safe now that dataStore below is Postgres, not SQLite.
+    replicaCount: 2
+
+    # HA prerequisite - upstream's own values.yaml says outright that scaling replicaCount
+    # above 1 does not work on sqlite3 (its own default). Migrated live from the single SQLite
+    # file (spirePostgres below is the CNPG cluster that datastore now lives in) - verified
+    # byte-for-byte on the trust bundle and ca_journals (the actual root CA/JWT key material)
+    # and row-count-exact on every other table before this cutover, not a fresh start.
+    # externalSecret, not an inline password, reads the DBPW straight from CNPG's own
+    # generated app Secret - confirmed live this is exactly what
+    # spire-server.datastore-postgres-passwordless's own logic expects to wire DBPW from.
+    dataStore:
+      sql:
+        databaseType: postgres
+        databaseName: spire
+        host: spire-postgres-rw
+        username: spire
+        externalSecret:
+          enabled: true
+          name: spire-postgres-app
+          key: password
+        options:
+          - sslmode: require
+
     # CA certificate's own subject (not the leaf-SVID subject, which stays
     # at SPIRE's own default "O=SPIRE, C=US" - that one isn't exposed by
     # this chart or the ClusterSPIFFEID CRD, see docs discussion). This
@@ -256,6 +280,19 @@ tornjakIngress:
 #     namespaceSelector:
 #       matchLabels:
 #         kubernetes.io/metadata.name: example-namespace
+# A CNPG Postgres cluster for spire-server's own datastore - the prerequisite for HA
+# (spire-server.replicaCount > 1), since upstream's own chart is explicit SQLite cannot be
+# shared across replicas. Deliberately created and left disabled by default here -
+# `spirePostgres.enabled: true` only stands up the Postgres cluster itself, additive and
+# harmless to the live SQLite-backed server; it does NOT migrate data or cut spire-server over
+# to it - that's a separate, deliberate step (see docs/1-operations, once written) only taken
+# after the migration has been proven against a copy of the live SQLite data.
+spirePostgres:
+  enabled: false
+  instances: 2
+  storageClass: ha-gen-lh
+  storageSize: 2Gi
+
 registrationEntries:
   # Throwaway PoC (docs/2026-10-29-first-workload-poc.md step 1), proving
   # the SPIFFE chain end-to-end before touching any real workload. Remove

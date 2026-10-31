@@ -28,3 +28,6 @@ are grouped into numbered folders, matching `ITL.Headscale/docs/`'s pattern - ea
   Keycloak 26.8's RFC 7523 JWT Authorization Grant (not the `token-exchange` grant type) turned
   out to be the real mechanism here, and the one credential-handling step still left for a human
   to finish the live end-to-end verification.
+- [1.5 SPIRE server HA: migrating from SQLite to Postgres](1-operations/1.5-ha-postgres-migration.md):
+  the live migration order that kept the trust domain root safe throughout, the two real
+  SQLite-to-Postgres data gotchas found, and the HA proof (killing a replica mid-traffic).
